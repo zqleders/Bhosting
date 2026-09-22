@@ -7,12 +7,12 @@ from datetime import datetime
 from seleniumbase import SB
 
 # 环境变量配置(可以直接私库在双引号里填写)
-EMAIL         = os.environ.get("EMAIL") or ""           # 邮箱,只用于通知使用，可随意填写
+EMAIL = os.environ.get("EMAIL") or ""           # 邮箱,只用于通知使用，可随意填写
 SESSION_TOKEN = os.environ.get("SESSION_TOKEN") or ""   # session token，默认登录方式,非必须
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN") or ""   # Discord Token 备用登录方式, 失败时才使用,必须填写
-GH_TOKEN      = os.environ.get("GH_TOKEN") or ""        # GitHub PAT token,用于自动更新session token,可选
-TG_CHAT_ID    = os.environ.get("TG_CHAT_ID") or ""      # TG chat id,不填写不通知，需和bot token一起填写生效
-TG_BOT_TOKEN  = os.environ.get("TG_BOT_TOKEN") or ""    # TG bot token 
+GH_TOKEN = os.environ.get("GH_TOKEN") or ""        # GitHub PAT token,用于自动更新session token,可选
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""      # TG chat id,不填写不通知，需和bot token一起填写生效
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""    # TG bot token 
 
 # 解析 DISCORD_TOKEN
 DC_TOKEN = ""
@@ -130,7 +130,7 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
         else:
             masked_email = f"{name}@{domain}"
     else:
-        masked_email = EMAIL[:2] + '****' 
+        masked_email = EMAIL[:2] + '****' if EMAIL else "未设置"
     
     lines = [
         "🇫🇮 Bot-hosting 续期通知",
@@ -183,7 +183,7 @@ def format_countdown(countdown_str: str) -> str:
             return f"{h}h{m}min"
         else:
             return f"{m}min"
-    except:
+    except Exception:
         return countdown_str
 
 # 获取过期日期
@@ -191,8 +191,8 @@ def extract_expiry_date(page_source: str) -> str:
     patterns = [
         r"[Ee]xpires\s*[:\-]?\s*(\d{4}/\d{2}/\d{2})",   # Expires 2026/07/07
         r"[Ee]xpires\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})",   # Expires 07/07/2026 (MM/DD/YYYY)
-        r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew",        # 2026/07/07 - renew
-        r"(\d{2}/\d{2}/\d{4})\s*[\-–]\s*renew",        # 07/07/2026 - renew
+        r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew",         # 2026/07/07 - renew
+        r"(\d{2}/\d{2}/\d{4})\s*[\-–]\s*renew",         # 07/07/2026 - renew
         r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew manually to extend for 4 days", # 2026/07/07 - renew manually to extend for 4 days
     ]
     for pattern in patterns:
@@ -385,7 +385,6 @@ def main():
     PROXY_SERVER = os.environ.get("PROXY_SERVER", "").strip() or "http://127.0.0.1:1080"
     HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true" 
 
-    # 引入 Falix 代码中稳定的环境参数设置
     sb_kwargs = {
         "uc": True, 
         "headed": not HEADLESS, 
@@ -510,7 +509,7 @@ def main():
                             outer_renew_selector = selector
                             print(f"✅ 续期按钮可用: '{button_text}'")
                             break
-                except Exception as e:
+                except Exception:
                     pass
 
             # 点击外部续期按钮等待弹窗
@@ -527,39 +526,32 @@ def main():
                     send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
                     return
 
-                # 【核心重构部分】：精准等待弹窗内的 Turnstile 渲染并操作
+                # 处理弹窗中的 Turnstile 验证
                 print("🔒 检测并精准处理弹窗中的 Turnstile 验证...")
                 iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
                 
                 try:
-                    # 1. 显式等待 CF 验证码 iframe 在 Modal 弹窗中成功加载渲染出来 (最多等待 15 秒)
-                    sb.wait_for_element_present(iframe_selector, timeout=15)
-                    print("✅ 找到 Turnstile iframe，准备进入 iframe...")
-                    
-                    # 2. 切入 iframe
-                    sb.switch_to_frame(iframe_selector)
-                    time.sleep(1)
-                    
-                    # 3. 勾选复选框或点击 body
-                    if sb.is_element_present('input[type="checkbox"]'):
-                        sb.click('input[type="checkbox"]')
-                        print("✅ 已点击 Turnstile 复选框")
-                    else:
-                        sb.click('body')
-                        print("✅ 已点击 Turnstile body 区域")
-                        
+                    # 1. 优先使用 SeleniumBase 原生内建的反爬 GUI 验证点击
+                    sb.uc_gui_click_captcha()
+                    print("✅ 已尝试通过 uc_gui_click_captcha 点击验证框")
                 except Exception as cf_err:
-                    print(f"⚠️ 未能顺利在 iframe 内处理 CF 验证 ({cf_err})，退回调用 uc_gui_click_captcha...")
-                    sb.switch_to_default_content()
+                    print(f"⚠️ uc_gui_click_captcha 触发异常 ({cf_err})，尝试手动切入 iframe...")
                     try:
-                        sb.uc_gui_click_captcha()
-                    except Exception as e:
-                        print(f"⚠️ uc_gui_click_captcha 执行忽略: {e}")
-                finally:
-                    # 必须确保切回主文档
-                    sb.switch_to_default_content()
+                        if sb.is_element_present(iframe_selector):
+                            sb.switch_to_frame(iframe_selector)
+                            time.sleep(1)
+                            if sb.is_element_present('input[type="checkbox"]'):
+                                sb.click('input[type="checkbox"]')
+                                print("✅ 已点击 Turnstile 复选框")
+                            else:
+                                sb.click('body')
+                                print("✅ 已点击 Turnstile body 区域")
+                    except Exception as manual_err:
+                        print(f"⚠️ 手动点击 iframe 失败: {manual_err}")
+                    finally:
+                        sb.switch_to_default_content()
 
-                # 4. 等待 Cloudflare Token 校验通过
+                # 2. 等待 Cloudflare Token 校验通过
                 if not wait_for_turnstile_pass(sb, timeout=20):
                     print("❌ Turnstile 验证最终未通过，脚本退出")
                     send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 验证未通过"))
