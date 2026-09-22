@@ -540,6 +540,7 @@ def main():
             modal_button_clicked = False
             try:
                 send_telegram_photo(sb, "👆 准备点击弹窗中的 Renew for 4 days 按钮")
+                time.sleep(5)  # 点击前等待 5 秒
                 sb.click('button:contains("Renew for 4 days")', timeout=8)
                 modal_button_clicked = True
                 print("✅ 已点击续期按钮")
