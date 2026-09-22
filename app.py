@@ -514,21 +514,41 @@ def main():
 
             # 处理弹窗中的 Turnstile
             print("🔒 检测弹窗中的 Turnstile 验证...")
-            turnstile_passed = False
-            for attempt in range(1, 4):
+            iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
+            
+            if sb.is_element_present(iframe_selector):
                 try:
-                    sb.uc_gui_click_captcha()
-                    time.sleep(12)
-                except Exception as e:
-                    print(f"⚠️ 点击 Turnstile 出错: {e}")
+                    sb.switch_to_frame(iframe_selector)
+                    time.sleep(1)
+                    
+                    if sb.is_element_present('input[type="checkbox"]'):
+                        sb.click('input[type="checkbox"]')
+                    else:
+                        sb.click('body')
+                        
+                    print("[INFO] 已在 iframe 内触发点击，等待验证结果...")
+                    
+                    verified = False
+                    for _ in range(10):
+                        time.sleep(1)
+                        page_text = sb.get_page_source()
+                        if any(term in page_text for term in ["成功", "Success", "Successful"]):
+                            verified = True
+                            print("[INFO] CF 验证成功！已检测到成功标识 span。")
+                            break
+                    
+                    if not verified:
+                        print("[WARNING] 未在规定时间内检测到验证成功的文本标识，继续尝试主流程...")
+                        
+                except Exception as cf_err:
+                    print(f"[ERROR] 处理 iframe 内 CF 验证时出错: {cf_err}")
+                finally:
+                    sb.switch_to_default_content()
+            else:
+                print("[INFO] 未找到特定 iframe，调用 uc_gui_click_captcha 尝试自动绕过...")
+                sb.uc_gui_click_captcha()
 
-                if wait_for_turnstile_pass(sb, timeout=20):
-                    turnstile_passed = True
-                    break
-                else:
-                    print(f"⏳ 第 {attempt} 次未通过，重试点击...")
-
-            if not turnstile_passed:
+            if not wait_for_turnstile_pass(sb, timeout=20):
                 print("❌ Turnstile 验证最终未通过，脚本退出")
                 send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 验证未通过"))
                 return
