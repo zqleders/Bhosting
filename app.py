@@ -152,102 +152,6 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
-# ==================== 纯复选框 (Checkbox) 状态检测逻辑 ====================
-
-def check_checkbox_checked(sb) -> bool:
-    """
-    只检测人机验证 Checkbox 是否已经被勾选（aria-checked == "true" 或 checked == true）
-    """
-    try:
-        is_checked = sb.execute_script("""
-            function isCheckboxChecked(doc) {
-                // 1. 查找所有可能代表验证框复选框的元素
-                let selectors = [
-                    'input[type="checkbox"]',
-                    '[role="checkbox"]',
-                    '#challenge-stage input',
-                    '#cb-i'
-                ];
-                
-                for (let sel of selectors) {
-                    let els = doc.querySelectorAll(sel);
-                    for (let el of els) {
-                        if (el.getAttribute('aria-checked') === 'true' || el.checked === true) {
-                            return true;
-                        }
-                    }
-                }
-                
-                # 2. 检查 Cloudflare 特有的成功图标或 Class (如 #success-icon)
-                if (doc.querySelector('#success-icon') || doc.querySelector('.mark') || doc.querySelector('.success')) {
-                    return true;
-                }
-                
-                return false;
-            }
-
-            // 先检测主文档
-            if (isCheckboxChecked(document)) return true;
-
-            // 再检测页面内部所有 iframe
-            let iframes = document.querySelectorAll('iframe');
-            for (let iframe of iframes) {
-                try {
-                    let innerDoc = iframe.contentDocument || iframe.contentWindow.document;
-                    if (innerDoc && isCheckboxChecked(innerDoc)) {
-                        return true;
-                    }
-                } catch(e) {}
-            }
-
-            return false;
-        """)
-        return bool(is_checked)
-    except Exception:
-        return False
-
-def handle_turnstile_pass(sb, max_retries=5) -> bool:
-    """
-    只观察并判断人机 Checkbox 是否打勾
-    """
-    print("🔒 检测并处理弹窗中的 Turnstile 人机验证...")
-
-    # 优先检测：可能打开弹窗时就已经自动打勾了
-    if check_checkbox_checked(sb):
-        print("✅ 复选框已打勾！(自动通过)")
-        send_telegram_photo(sb, "✅ 人机 Checkbox 已打勾")
-        return True
-
-    for attempt in range(1, max_retries + 1):
-        print(f"🔄 正在尝试点击并校验 Checkbox 状态 (第 {attempt}/{max_retries} 次)...")
-        
-        try:
-            sb.uc_gui_click_captcha()
-        except Exception as e:
-            print(f"⚠️ uc_gui_click_captcha 执行提示: {e}")
-
-        # 连续监测 6 秒，观察复选框是否变成勾选状态
-        for _ in range(6):
-            time.sleep(1)
-            if check_checkbox_checked(sb):
-                print("✅ 检测到人机复选框已成功打勾！")
-                send_telegram_photo(sb, "✅ 人机 Checkbox 已打勾")
-                return True
-
-        time.sleep(1)
-
-    # 最终确认
-    if check_checkbox_checked(sb):
-        print("✅ 人机复选框已成功打勾！")
-        send_telegram_photo(sb, "✅ 人机 Checkbox 已打勾")
-        return True
-    else:
-        print("❌ 人机复选框未打勾，验证未通过")
-        send_telegram_photo(sb, "❌ 人机 Checkbox 未打勾")
-        return False
-
-# ==============================================================================
-
 # 获取当前出口ip
 def get_current_ip(proxy_server: str = "") -> str:
     proxies = None
@@ -608,35 +512,36 @@ def main():
                     send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
                     return
 
-                # 检测 Checkbox 是否打勾
-                if not handle_turnstile_pass(sb, max_retries=5):
-                    print("❌ 复选框未勾选，脚本退出")
-                    send_telegram_message(format_notification("❌ 续期失败", error="人机验证未打勾"))
-                    return
+                # 点击人机验证框，不做拦截，直接继续
+                print("🔒 触发点击 Turnstile 验证码...")
+                try:
+                    sb.uc_gui_click_captcha()
+                except Exception as e:
+                    print(f"⚠️ uc_gui_click_captcha 点击提示: {e}")
 
-                # 点击续期按钮
-                print("⏳ 等待续期按钮可用并点击...")
-                time.sleep(2) 
+                print("⏳ 等待 3 秒后直接尝试点击弹窗续期按钮...")
+                time.sleep(3)
 
+                # 直接尝试点击弹窗内部的续期按钮
                 try:
                     send_telegram_photo(sb, "👆 准备点击弹窗中的 Renew for 4 days 按钮")
-                    time.sleep(1)
                     sb.click('button:contains("Renew for 4 days")', timeout=8)
-                    print("✅ 已点击续期按钮")
+                    print("✅ 已点击 Renew for 4 days 按钮")
                 except Exception as e:
-                    print(f"❌ 续期按钮点击失败: {e}")
+                    print(f"⚠️ 点击弹窗续期按钮抛出异常: {e}")
 
-                print("⏳ 等待新的过期时间...")
+                print("⏳ 等待 6 秒检测页面数据更新...")
                 sb.sleep(6)
                 send_telegram_photo(sb, "⌛ 续期操作完成后的页面状态")
 
-                # 提取新的到期日期和倒计时
+                # 根据续期后的页面真实变动结果判定成功与否
                 new_page_text = sb.get_page_source()
                 new_expiry = extract_expiry_date(new_page_text)
                 new_match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", new_page_text)
+                
                 if new_match:
                     new_countdown = new_match.group(1)
-                    print(f"✅ 续期成功！新的倒计时: {new_countdown}")
+                    print(f"🎉 续期成功！新的倒计时: {new_countdown}")
                     if new_expiry:
                         print(f"📅 新的到期日期: {new_expiry}")
                     send_telegram_message(
@@ -646,25 +551,24 @@ def main():
                             expiry_date=new_expiry or "（未获取到）"
                         )
                     )
+                elif new_expiry and new_expiry != current_expiry:
+                    print(f"🎉 续期成功，到期日期已更新为: {new_expiry}")
+                    send_telegram_message(
+                        format_notification(
+                            "✅ 续期成功",
+                            extra="到期日期已更新",
+                            expiry_date=new_expiry
+                        )
+                    )
                 else:
-                    if new_expiry and new_expiry != current_expiry:
-                        print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
-                        send_telegram_message(
-                            format_notification(
-                                "✅ 续期成功",
-                                extra="到期日期已更新",
-                                expiry_date=new_expiry
-                            )
+                    print("❌ 续期未成功或页面未变动，请检查")
+                    send_telegram_message(
+                        format_notification(
+                            "❌ 续期未成功",
+                            extra="到期时间未更新，请检查",
+                            expiry_date=current_expiry or "（未获取到）"
                         )
-                    else:
-                        print("⚠️ 续期结果未知，到期日期未变化，请手动检查")
-                        send_telegram_message(
-                            format_notification(
-                                "⚠️ 续期可能未成功",
-                                extra="请登录后台检查",
-                                expiry_date=current_expiry or "（未获取到）"
-                            )
-                        )
+                    )
 
             else:
                 send_telegram_photo(sb, "ℹ️ 当前无需续期或未找到续期按钮")
