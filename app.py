@@ -519,8 +519,8 @@ def main():
                 except Exception as e:
                     print(f"⚠️ uc_gui_click_captcha 点击提示: {e}")
 
-                print("⏳ 等待 3 秒后直接尝试点击弹窗续期按钮...")
-                time.sleep(3)
+                print("⏳ 等待 5 秒后直接尝试点击弹窗续期按钮...")
+                time.sleep(5)
 
                 # 直接尝试点击弹窗内部的续期按钮
                 try:
