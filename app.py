@@ -14,10 +14,6 @@ GH_TOKEN = os.environ.get("GH_TOKEN") or ""        # GitHub PAT token,用于自�
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""      # TG chat id,不填写不通知，需和bot token一起填写生效
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""    # TG bot token 
 
-# 窗口初始位置设置（可以根据你上次拖动的习惯坐标进行调节，默认 x=100, y=100）
-WINDOW_X = int(os.environ.get("WINDOW_X", 100))
-WINDOW_Y = int(os.environ.get("WINDOW_Y", 100))
-
 # 解析 DISCORD_TOKEN
 DC_TOKEN = ""
 if DISCORD_TOKEN:
@@ -156,62 +152,98 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
-# ==================== 修复崩溃的 CF Turnstile 处理逻辑 ====================
+# ==================== 纯复选框 (Checkbox) 状态检测逻辑 ====================
 
-def check_cf_turnstile_token(sb) -> bool:
+def check_checkbox_checked(sb) -> bool:
     """
-    检查页面中隐藏的 cf-turnstile-response 输入框是否拿到了凭证 Token
+    只检测人机验证 Checkbox 是否已经被勾选（aria-checked == "true" 或 checked == true）
     """
     try:
-        token = sb.execute_script("""
-            let el = document.querySelector('input[name="cf-turnstile-response"]');
-            return el ? el.value : '';
+        is_checked = sb.execute_script("""
+            function isCheckboxChecked(doc) {
+                // 1. 查找所有可能代表验证框复选框的元素
+                let selectors = [
+                    'input[type="checkbox"]',
+                    '[role="checkbox"]',
+                    '#challenge-stage input',
+                    '#cb-i'
+                ];
+                
+                for (let sel of selectors) {
+                    let els = doc.querySelectorAll(sel);
+                    for (let el of els) {
+                        if (el.getAttribute('aria-checked') === 'true' || el.checked === true) {
+                            return true;
+                        }
+                    }
+                }
+                
+                # 2. 检查 Cloudflare 特有的成功图标或 Class (如 #success-icon)
+                if (doc.querySelector('#success-icon') || doc.querySelector('.mark') || doc.querySelector('.success')) {
+                    return true;
+                }
+                
+                return false;
+            }
+
+            // 先检测主文档
+            if (isCheckboxChecked(document)) return true;
+
+            // 再检测页面内部所有 iframe
+            let iframes = document.querySelectorAll('iframe');
+            for (let iframe of iframes) {
+                try {
+                    let innerDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    if (innerDoc && isCheckboxChecked(innerDoc)) {
+                        return true;
+                    }
+                } catch(e) {}
+            }
+
+            return false;
         """)
-        if token and len(str(token).strip()) > 20:
-            return True
+        return bool(is_checked)
     except Exception:
-        pass
-    return False
+        return False
 
 def handle_turnstile_pass(sb, max_retries=5) -> bool:
     """
-    防崩溃的 Cloudflare Turnstile 验证点击与校验逻辑
+    只观察并判断人机 Checkbox 是否打勾
     """
-    print("🔒 检测并精准处理弹窗中的 Turnstile 验证...")
+    print("🔒 检测并处理弹窗中的 Turnstile 人机验证...")
 
-    # 优先检测：是否已经过验证
-    if check_cf_turnstile_token(sb):
-        print("✅ Turnstile 验证已自动通过 (已校验 Token)")
-        send_telegram_photo(sb, "✅ Turnstile 验证已自动通过")
+    # 优先检测：可能打开弹窗时就已经自动打勾了
+    if check_checkbox_checked(sb):
+        print("✅ 复选框已打勾！(自动通过)")
+        send_telegram_photo(sb, "✅ 人机 Checkbox 已打勾")
         return True
 
     for attempt in range(1, max_retries + 1):
-        print(f"🔄 正在尝试通过 Turnstile 验证 (第 {attempt}/{max_retries} 次)...")
+        print(f"🔄 正在尝试点击并校验 Checkbox 状态 (第 {attempt}/{max_retries} 次)...")
         
-        # 使用 SeleniumBase 原生 UC GUI 验证解决逻辑（不再切换 iframe，防止 Driver 崩溃）
         try:
             sb.uc_gui_click_captcha()
         except Exception as e:
             print(f"⚠️ uc_gui_click_captcha 执行提示: {e}")
 
-        # 轮询校验 Token 状态（给予 CF 3~5 秒的反应时间）
-        for _ in range(5):
+        # 连续监测 6 秒，观察复选框是否变成勾选状态
+        for _ in range(6):
             time.sleep(1)
-            if check_cf_turnstile_token(sb):
-                print("✅ Turnstile 验证已成功通过 (已校验真实 Token)")
-                send_telegram_photo(sb, "✅ Turnstile 验证已成功通过")
+            if check_checkbox_checked(sb):
+                print("✅ 检测到人机复选框已成功打勾！")
+                send_telegram_photo(sb, "✅ 人机 Checkbox 已打勾")
                 return True
 
-        time.sleep(random.uniform(1.5, 2.5))
+        time.sleep(1)
 
-    # 最终二次确认
-    if check_cf_turnstile_token(sb):
-        print("✅ Turnstile 验证已成功通过")
-        send_telegram_photo(sb, "✅ Turnstile 验证已成功通过")
+    # 最终确认
+    if check_checkbox_checked(sb):
+        print("✅ 人机复选框已成功打勾！")
+        send_telegram_photo(sb, "✅ 人机 Checkbox 已打勾")
         return True
     else:
-        print("❌ Turnstile 验证超时未通过 (未生成有效的 cf-turnstile-response Token)")
-        send_telegram_photo(sb, "❌ Turnstile 验证超时未通过")
+        print("❌ 人机复选框未打勾，验证未通过")
+        send_telegram_photo(sb, "❌ 人机 Checkbox 未打勾")
         return False
 
 # ==============================================================================
@@ -440,8 +472,7 @@ def main():
         "uc": True, 
         "headed": not HEADLESS, 
         "locale_code": "en", 
-        "incognito": True,
-        "chromium_arg": f"--window-position={WINDOW_X},{WINDOW_Y}"
+        "incognito": True
     }
 
     if IS_PROXY:
@@ -455,10 +486,6 @@ def main():
     with SB(**sb_kwargs) as sb:
         try:
             sb.set_window_size(1920, 1080)
-            try:
-                sb.driver.set_window_position(WINDOW_X, WINDOW_Y)
-            except Exception:
-                pass
             
             try:
                 ip = get_current_ip(PROXY_SERVER if IS_PROXY else "")
@@ -581,19 +608,19 @@ def main():
                     send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
                     return
 
-                # 调用安全的 Turnstile 验证处理函数
+                # 检测 Checkbox 是否打勾
                 if not handle_turnstile_pass(sb, max_retries=5):
-                    print("❌ Turnstile 验证最终未通过，脚本退出")
-                    send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 验证未通过"))
+                    print("❌ 复选框未勾选，脚本退出")
+                    send_telegram_message(format_notification("❌ 续期失败", error="人机验证未打勾"))
                     return
 
                 # 点击续期按钮
                 print("⏳ 等待续期按钮可用并点击...")
-                time.sleep(3) 
+                time.sleep(2) 
 
                 try:
                     send_telegram_photo(sb, "👆 准备点击弹窗中的 Renew for 4 days 按钮")
-                    time.sleep(2)
+                    time.sleep(1)
                     sb.click('button:contains("Renew for 4 days")', timeout=8)
                     print("✅ 已点击续期按钮")
                 except Exception as e:
