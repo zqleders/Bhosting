@@ -36,13 +36,16 @@ _LOGIN_METHOD = "SESSION_TOKEN"
 
 # 获取cookie到期时间
 def get_cookie_info(sb, name):
-    cookies = sb.get_cookies()
-    for c in cookies:
-        if c.get('name') == name:
-            value = c.get('value')
-            expiry_ts = c.get('expiry')
-            expiry_dt = datetime.fromtimestamp(expiry_ts) if expiry_ts else None
-            return value, expiry_dt
+    try:
+        cookies = sb.get_cookies()
+        for c in cookies:
+            if c.get('name') == name:
+                value = c.get('value')
+                expiry_ts = c.get('expiry')
+                expiry_dt = datetime.fromtimestamp(expiry_ts) if expiry_ts else None
+                return value, expiry_dt
+    except Exception:
+        pass
     return None, None
 
 # 检查是否需要更新cookie
@@ -149,12 +152,11 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
-# ==================== 彻底修改与优化的 CF Turnstile 处理逻辑 ====================
+# ==================== 修复崩溃的 CF Turnstile 处理逻辑 ====================
 
 def check_cf_turnstile_token(sb) -> bool:
     """
-    通过底层 JS 精准检查页面中隐藏的 cf-turnstile-response 输入框是否拿到了凭证 Token。
-    只有拿到长度大于 20 的有效 Token 才是真正成功通过验证。
+    检查页面中隐藏的 cf-turnstile-response 输入框是否拿到了凭证 Token
     """
     try:
         token = sb.execute_script("""
@@ -169,46 +171,26 @@ def check_cf_turnstile_token(sb) -> bool:
 
 def handle_turnstile_pass(sb, max_retries=5) -> bool:
     """
-    精准点击并绝对校验 Cloudflare Turnstile 人机验证
+    防崩溃的 Cloudflare Turnstile 验证点击与校验逻辑
     """
     print("🔒 检测并精准处理弹窗中的 Turnstile 验证...")
 
-    # 优先检测：部分 Cookie/IP 可能直接免打勾通过
+    # 优先检测：是否已经过验证
     if check_cf_turnstile_token(sb):
         print("✅ Turnstile 验证已自动通过 (已校验 Token)")
         send_telegram_photo(sb, "✅ Turnstile 验证已自动通过")
         return True
 
-    iframe_selector = 'iframe[src*="challenges.cloudflare.com"]'
-
     for attempt in range(1, max_retries + 1):
         print(f"🔄 正在尝试通过 Turnstile 验证 (第 {attempt}/{max_retries} 次)...")
         
-        # 1. 优先尝试 SeleniumBase 的反爬 GUI 点击算法
+        # 使用 SeleniumBase 原生 UC GUI 验证解决逻辑（不再切换 iframe，防止 Driver 崩溃）
         try:
             sb.uc_gui_click_captcha()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ uc_gui_click_captcha 执行提示: {e}")
 
-        # 2. 如果原生 API 没效果，尝试精准切入 iframe 点击或使用坐标辅助
-        if not check_cf_turnstile_token(sb):
-            try:
-                if sb.is_element_present(iframe_selector):
-                    sb.switch_to_frame(iframe_selector)
-                    time.sleep(0.5)
-                    # 尝试点击复选框或内部容器
-                    if sb.is_element_present('input[type="checkbox"]'):
-                        sb.click('input[type="checkbox"]')
-                    elif sb.is_element_present('#challenge-stage'):
-                        sb.click('#challenge-stage')
-                    else:
-                        sb.click('body')
-            except Exception:
-                pass
-            finally:
-                sb.switch_to_default_content()
-
-        # 3. 循环轮询检查是否生成了 Token（给 Cloudflare 响应沉淀 3~5 秒）
+        # 轮询校验 Token 状态（给予 CF 3~5 秒的反应时间）
         for _ in range(5):
             time.sleep(1)
             if check_cf_turnstile_token(sb):
@@ -216,10 +198,9 @@ def handle_turnstile_pass(sb, max_retries=5) -> bool:
                 send_telegram_photo(sb, "✅ Turnstile 验证已成功通过")
                 return True
 
-        # 随机等待，防止被风控捕获频控特征
         time.sleep(random.uniform(1.5, 2.5))
 
-    # 最终结果二次校验
+    # 最终二次确认
     if check_cf_turnstile_token(sb):
         print("✅ Turnstile 验证已成功通过")
         send_telegram_photo(sb, "✅ Turnstile 验证已成功通过")
@@ -266,10 +247,9 @@ def extract_expiry_date(page_source: str) -> str:
         match = re.search(pattern, page_source)
         if match:
             date_str = match.group(1)
-            # 如果是 MM/DD/YYYY 格式，转换为 YYYY/MM/DD
-            if len(date_str.split('/')[-1]) == 4:  # 年份长度4
+            if len(date_str.split('/')[-1]) == 4:
                 parts = date_str.split('/')
-                if len(parts[0]) == 2:  # 第一部分是2位（月）
+                if len(parts[0]) == 2:
                     return f"{parts[2]}/{parts[0]}/{parts[1]}"
             return date_str
     return None
@@ -437,7 +417,7 @@ def main():
     print("    Bot-hosting 自动续期")
     print("#" * 25)
 
-    # Linux 环境自动初始化虚拟显示屏（对无头模式下过 CF 关键）
+    # Linux 环境自动初始化虚拟显示屏
     display = None
     if platform.system().lower() == "linux":
         try:
@@ -469,7 +449,6 @@ def main():
 
     with SB(**sb_kwargs) as sb:
         try:
-            # 强制设定 1080p 标准分辨率，防止元素挤压变形
             sb.set_window_size(1920, 1080)
             
             try:
@@ -480,7 +459,7 @@ def main():
 
             login_ok = False
 
-            # 方式1: SESSION_TOKEN Cookie 登录（默认）
+            # 方式1: SESSION_TOKEN Cookie 登录
             if SESSION_TOKEN:
                 print("🚀 启动浏览器...")
                 sb.open("https://bot-hosting.net/")
@@ -508,7 +487,7 @@ def main():
                     print(f"❌ SESSION_TOKEN 登录失败，当前URL: {current_url}, 当前标题: {current_title}")
                     send_telegram_photo(sb, "❌ SESSION_TOKEN 登录失败")
 
-            # 方式2: Discord OAuth 登录（备用）
+            # 方式2: Discord OAuth 登录
             if not login_ok and DC_TOKEN:
                 _LOGIN_METHOD = "Discord Token"
                 print("\n🔄 SESSION_TOKEN 登录失败或未配置，尝试 Discord OAuth 登录...")
@@ -586,14 +565,14 @@ def main():
                 try:
                     sb.sleep(2)
                     sb.click(outer_renew_selector)
-                    sb.sleep(3)  # 给予界面弹窗基本的出现动画时间
+                    sb.sleep(3)
                     send_telegram_photo(sb, "💬 已点击外部续期按钮，等待 Modal 模态框完全渲染")
                 except Exception as e:
                     print(f"❌ 点击外部按钮失败: {e}")
                     send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
                     return
 
-                # 调用精准改造后的 Turnstile 验证处理函数
+                # 调用安全的 Turnstile 验证处理函数
                 if not handle_turnstile_pass(sb, max_retries=5):
                     print("❌ Turnstile 验证最终未通过，脚本退出")
                     send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 验证未通过"))
@@ -603,12 +582,10 @@ def main():
                 print("⏳ 等待续期按钮可用并点击...")
                 time.sleep(3) 
 
-                modal_button_clicked = False
                 try:
                     send_telegram_photo(sb, "👆 准备点击弹窗中的 Renew for 4 days 按钮")
                     time.sleep(2)
                     sb.click('button:contains("Renew for 4 days")', timeout=8)
-                    modal_button_clicked = True
                     print("✅ 已点击续期按钮")
                 except Exception as e:
                     print(f"❌ 续期按钮点击失败: {e}")
