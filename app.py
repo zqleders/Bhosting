@@ -148,7 +148,7 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     if extra:
         lines.append(extra)
     if error:
-        lines.append(f"⚠️ 错误信息: {error}")
+        lines.append(f"⚠ 错误信息: {error}")
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
@@ -512,23 +512,27 @@ def main():
                     send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
                     return
 
-                # 点击人机验证框，不做拦截，直接继续
-                print("🔒 触发点击 Turnstile 验证码...")
-                try:
-                    sb.uc_gui_click_captcha()
-                except Exception as e:
-                    print(f"⚠️ uc_gui_click_captcha 点击提示: {e}")
+                # 循环多次尝试点击 CF 验证框
+                print("🔒 开始多次循环点击 CF 验证框...")
+                for attempt in range(1, 7):
+                    print(f"🔄 尝试点击 Turnstile 验证码 (第 {attempt}/6 次)...")
+                    try:
+                        sb.uc_gui_click_captcha()
+                    except Exception as e:
+                        print(f"⚠️ uc_gui_click_captcha 提示: {e}")
+                    time.sleep(2)
 
-                print("⏳ 等待 5 秒后直接尝试点击弹窗续期按钮...")
+                # 固定延时 5 秒等待响应
+                print("⏳ 延时 5 秒等待人机验证完毕...")
                 time.sleep(5)
 
-                # 直接尝试点击弹窗内部的续期按钮
+                # 直接点击 Renew 按钮
                 try:
-                    send_telegram_photo(sb, "👆 准备点击弹窗中的 Renew for 4 days 按钮")
+                    send_telegram_photo(sb, "👆 准备点击 Renew for 4 days 按钮")
                     sb.click('button:contains("Renew for 4 days")', timeout=8)
-                    print("✅ 已点击 Renew for 4 days 按钮")
+                    print("✅ 已尝试点击 Renew for 4 days 按钮")
                 except Exception as e:
-                    print(f"⚠️ 点击弹窗续期按钮抛出异常: {e}")
+                    print(f"❌ 点击弹窗续期按钮失败: {e}")
 
                 print("⏳ 等待 6 秒检测页面数据更新...")
                 sb.sleep(6)
@@ -547,7 +551,7 @@ def main():
                     send_telegram_message(
                         format_notification(
                             "✅ 续期成功",
-                            extra=f"⏱️ 可续期时间: {format_countdown(new_countdown)}后",
+                            extra=f"⏱ 可续期时间: {format_countdown(new_countdown)}后",
                             expiry_date=new_expiry or "（未获取到）"
                         )
                     )
@@ -583,7 +587,7 @@ def main():
                         )
                     )
                 else:
-                    print("ℹ️ 未找到续期按钮或倒计时，状态未知")
+                    print("ℹ️️ 未找到续期按钮或倒计时，状态未知")
                     send_telegram_message(
                         format_notification(
                             "ℹ️ 无需续期",
