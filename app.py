@@ -174,24 +174,42 @@ def format_countdown(countdown_str: str) -> str:
     except Exception:
         return countdown_str
 
-# 获取过期日期
+# 归一化日期格式
+def normalize_date(date_str: str) -> str:
+    parts = date_str.split('/')
+    if len(parts) == 3:
+        if len(parts[2]) == 4:   # MM/DD/YYYY
+            return f"{parts[2]}/{int(parts[0]):02d}/{int(parts[1]):02d}"
+        if len(parts[0]) == 4:   # YYYY/MM/DD
+            return f"{parts[0]}/{int(parts[1]):02d}/{int(parts[2]):02d}"
+    return date_str
+
+DATE_RE = r"(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})"
+
+# 获取过期日期（适配改版后的多种日期格式）
 def extract_expiry_date(page_source: str) -> str:
     patterns = [
-        r"[Ee]xpires\s*[:\-]?\s*(\d{4}/\d{2}/\d{2})",   # Expires 2026/07/07
-        r"[Ee]xpires\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})",   # Expires 07/07/2026 (MM/DD/YYYY)
-        r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew",         # 2026/07/07 - renew
-        r"(\d{2}/\d{2}/\d{4})\s*[\-–]\s*renew",         # 07/07/2026 - renew
-        r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew manually to extend for 4 days", # 2026/07/07 - renew manually to extend for 4 days
+        r"[Ee]xpires\s*[:\-]?\s*" + DATE_RE,
+        r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew",
+        r"(\d{2}/\d{2}/\d{4})\s*[\-–]\s*renew",
+        DATE_RE,
     ]
     for pattern in patterns:
         match = re.search(pattern, page_source)
         if match:
-            date_str = match.group(1)
-            if len(date_str.split('/')[-1]) == 4:
-                parts = date_str.split('/')
-                if len(parts[0]) == 2:
-                    return f"{parts[2]}/{parts[0]}/{parts[1]}"
-            return date_str
+            return normalize_date(match.group(1))
+    return None
+
+# 优先从改版后的 DOM 元素提取到期日期
+def get_expiry_from_dom(sb) -> str:
+    for selector in ['span.st-meta', '.st-meta', '[class*="st-meta"]']:
+        try:
+            if sb.is_element_present(selector):
+                match = re.search(DATE_RE, sb.get_text(selector))
+                if match:
+                    return normalize_date(match.group(1))
+        except Exception:
+            pass
     return None
 
 # Discord OAuth 登录（SESSION_TOKEN 失效时的备用方案）
@@ -462,21 +480,25 @@ def main():
             if _LOGIN_METHOD == "Discord Token":
                 print("ℹ️ 本次使用 Discord OAuth 登录，新的 SESSION_TOKEN 将自动更新到 Secrets")
 
-            # 提取当前到期日期
+            # 提取当前到期日期（适配改版后的 DOM 和页面文本）
             sb.sleep(2)
-            page_source = sb.get_page_source()
-            current_expiry = extract_expiry_date(page_source)
+            try:
+                page_source = sb.get_page_text() + "\n" + sb.get_page_source()
+            except Exception:
+                page_source = sb.get_page_source()
+            current_expiry = get_expiry_from_dom(sb) or extract_expiry_date(page_source)
             if current_expiry:
                 print(f"📅 当前到期日期: {current_expiry}")
             else:
                 print("⚠️ 未能提取当前到期日期")
 
-            # 寻找外部续期按钮
+            # 寻找外部续期按钮（适配改版后的按钮和冷却文案）
             outer_renew_selector = None
             countdown_text = None
             possible_selectors = [
-                'button:contains("Renew")',
                 'button:contains("Renew free plan")',
+                'button:contains("Renew")',
+                '[class*="btn btn-primary btn-sm"]',
                 'a:contains("Renew")',
                 '[class*="renew"]',
                 '[class*="Renew"]',
@@ -486,12 +508,12 @@ def main():
                 try:
                     if sb.is_element_visible(selector):
                         button_text = sb.get_text(selector)
-                        if "Renew in" in button_text:
-                            match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", button_text)
-                            if match:
-                                countdown_text = match.group(1)
+                        match = re.search(r"(?:Renew in|Renewal cooldown)\s+(\d{1,2}:\d{2}:\d{2})", button_text, re.I)
+                        if match:
+                            countdown_text = match.group(1)
+                            print(f"⏳ 续期冷却中, 未到续期时间: '{button_text}'")
                             break
-                        elif "Renew" in button_text and "in" not in button_text.lower():
+                        elif "Renew" in button_text:
                             outer_renew_selector = selector
                             print(f"✅ 续期按钮可用: '{button_text}'")
                             break
@@ -505,7 +527,7 @@ def main():
                 try:
                     sb.sleep(2)
                     sb.click(outer_renew_selector)
-                    sb.sleep(3)
+                    sb.sleep(10)  # 改版后模态框加载较慢，增加等待时间
                     send_telegram_photo(sb, "💬 已点击外部续期按钮，等待 Modal 模态框完全渲染")
                 except Exception as e:
                     print(f"❌ 点击外部按钮失败: {e}")
@@ -526,22 +548,32 @@ def main():
                 print("⏳ 延时 5 秒等待人机验证完毕...")
                 time.sleep(5)
 
-                # 直接点击 Renew 按钮
+                # 直接点击改版后的弹窗内确认续期按钮
                 try:
-                    send_telegram_photo(sb, "👆 准备点击 Renew for 4 days 按钮")
-                    sb.click('button:contains("Renew for 4 days")', timeout=8)
-                    print("✅ 已尝试点击 Renew for 4 days 按钮")
+                    send_telegram_photo(sb, "👆 准备点击弹窗内确认续期按钮")
+                    modal_selector = 'div[role="dialog"] button.btn-primary'
+                    if sb.is_element_visible(modal_selector):
+                        sb.click(modal_selector, timeout=8)
+                    else:
+                        sb.click('button:contains("Renew for 4 days")', timeout=8)
+                    print("✅ 已尝试点击弹窗确认续期按钮")
                 except Exception as e:
                     print(f"❌ 点击弹窗续期按钮失败: {e}")
 
-                print("⏳ 等待 6 秒检测页面数据更新...")
-                sb.sleep(6)
+                print("⏳ 等待刷新并检测页面数据更新...")
+                sb.sleep(5)
+                sb.refresh()
+                sb.wait_for_ready_state_complete()
+                sb.sleep(3)
                 send_telegram_photo(sb, "⌛ 续期操作完成后的页面状态")
 
-                # 根据续期后的页面真实变动结果判定成功与否
-                new_page_text = sb.get_page_source()
-                new_expiry = extract_expiry_date(new_page_text)
-                new_match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", new_page_text)
+                # 根据续期后的页面真实变动结果判定成功与否（适配新倒计时和日期格式）
+                try:
+                    new_page_text = sb.get_page_text() + "\n" + sb.get_page_source()
+                except Exception:
+                    new_page_text = sb.get_page_source()
+                new_expiry = get_expiry_from_dom(sb) or extract_expiry_date(new_page_text)
+                new_match = re.search(r"(?:Renewal cooldown|Renew in)\s+(\d{1,2}:\d{2}:\d{2})", new_page_text, re.I)
                 
                 if new_match:
                     new_countdown = new_match.group(1)
