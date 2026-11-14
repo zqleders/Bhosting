@@ -148,7 +148,7 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     if extra:
         lines.append(extra)
     if error:
-        lines.append(f"⚠ 错误信息: {error}")
+        lines.append(f"⚠️ 错误信息: {error}")
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
@@ -548,17 +548,48 @@ def main():
                 print("⏳ 延时 5 秒等待人机验证完毕...")
                 time.sleep(5)
 
-                # 直接点击改版后的弹窗内确认续期按钮
-                try:
-                    send_telegram_photo(sb, "👆 准备点击弹窗内确认续期按钮")
-                    modal_selector = 'div[role="dialog"] button.btn-primary'
-                    if sb.is_element_visible(modal_selector):
-                        sb.click(modal_selector, timeout=8)
-                    else:
-                        sb.click('button:contains("Renew for 4 days")', timeout=8)
-                    print("✅ 已尝试点击弹窗确认续期按钮")
-                except Exception as e:
-                    print(f"❌ 点击弹窗续期按钮失败: {e}")
+                # 直接点击改版后的弹窗内确认续期按钮（多选择器 + JS 兜底）
+                send_telegram_photo(sb, "👆 准备点击弹窗内确认续期按钮")
+                modal_clicked = False
+                modal_btn_selectors = [
+                    'div[role="dialog"] button.btn-primary',
+                    'div[role="dialog"] button:contains("Renew")',
+                    'div[role="dialog"] button:contains("Confirm")',
+                    'div[role="dialog"] button:contains("Extend")',
+                    '[class*="modal"] button.btn-primary',
+                    '[class*="modal"] button:contains("Renew")',
+                    'button:contains("Renew for 4 days")',
+                ]
+                for m_sel in modal_btn_selectors:
+                    try:
+                        if sb.is_element_visible(m_sel):
+                            sb.click(m_sel, timeout=5)
+                            print(f"✅ 已点击弹窗确认按钮 ({m_sel})")
+                            modal_clicked = True
+                            break
+                    except Exception:
+                        pass
+
+                # 兜底：如果常规选择器未触发，通过 JS 查找弹窗中的主按钮并点击
+                if not modal_clicked:
+                    try:
+                        clicked_js = sb.execute_script("""
+                            var dialog = document.querySelector('div[role="dialog"], [class*="modal"], [class*="dialog"]');
+                            if (dialog) {
+                                var btns = Array.from(dialog.querySelectorAll('button'));
+                                var target = btns.find(b => !b.disabled && /renew|confirm|extend/i.test(b.textContent)) || btns[btns.length - 1];
+                                if (target) { target.click(); return target.textContent.trim(); }
+                            }
+                            return '';
+                        """)
+                        if clicked_js:
+                            print(f"✅ 已通过 JS 点击弹窗按钮: '{clicked_js}'")
+                            modal_clicked = True
+                    except Exception as e:
+                        print(f"⚠️ JS 兜底点击弹窗按钮异常: {e}")
+
+                if not modal_clicked:
+                    print("❌ 未能找到或点击弹窗内确认续期按钮")
 
                 print("⏳ 等待刷新并检测页面数据更新...")
                 sb.sleep(5)
